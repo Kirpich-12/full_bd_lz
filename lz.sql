@@ -49,7 +49,7 @@ USE SalesDB;
 
 GO
 --Добавка клиентов
-CREATE PROCEDURE dbo.sp_AddCustomer
+CREATE PROCEDURE dbo.fn_sp_AddCustomer
     @FullName NVARCHAR(100),
     @Email NVARCHAR(100),
     @NewCustomerID INT OUTPUT
@@ -66,7 +66,7 @@ GO
 
 GO
 --новый заказ
-CREATE PROCEDURE dbo.sp_AddOrder
+CREATE PROCEDURE dbo.fn_sp_AddOrder
     @CustomerID INT,
     @OrderTotal FLOAT,
     @Status NVARCHAR(20) = N'Новый',
@@ -146,7 +146,7 @@ GO
 USE LogisticsDB;
 GO
 --новый склад
-CREATE PROCEDURE dbo.sp_AddWarehouse
+CREATE PROCEDURE dbo.fn_sp_AddWarehouse
     @Location NVARCHAR(100),
     @Capacity FLOAT,
     @ManagerContact NVARCHAR(50) = N'не назначен'
@@ -163,7 +163,7 @@ GO
 USE SalesDB;
 GO
 --получение заказов по статусу
-CREATE FUNCTION dbo.GetOrdersByStatus(@status NVARCHAR(20))
+CREATE FUNCTION dbo.fn_GetOrdersByStatus(@status NVARCHAR(20))
 RETURNS TABLE
 AS
 RETURN 
@@ -176,7 +176,7 @@ GO
 
 GO
 --все заказы
-CREATE FUNCTION dbo.Get_AllOrders()
+CREATE FUNCTION dbo.fn_Get_AllOrders()
 RETURNS TABLE
 AS
 RETURN 
@@ -188,7 +188,7 @@ GO
 
 GO
 --  получение клиентов
-CREATE FUNCTION dbo.GetAllCustomers()
+CREATE FUNCTION dbo.fn_GetAllCustomers()
 RETURNS TABLE
 AS
 RETURN 
@@ -202,7 +202,7 @@ GO
 USE LogisticsDB;
 GO
 --получение всех складов
-CREATE FUNCTION dbo.GetAllWarehouses()
+CREATE FUNCTION dbo.fn_GetAllWarehouses()
 RETURNS TABLE
 AS
 RETURN 
@@ -214,7 +214,7 @@ GO
 
 GO
 --получение доставок по складу
-CREATE FUNCTION dbo.Get_ShipmentsByWarehouse(@wid INT)
+CREATE FUNCTION dbo.fn_Get_ShipmentsByWarehouse(@wid INT)
 RETURNS TABLE
 AS
 RETURN 
@@ -227,7 +227,7 @@ GO
 
 GO
 --все доставки
-CREATE FUNCTION dbo.Get_AllShipments()
+CREATE FUNCTION dbo.fn_Get_AllShipments()
 RETURNS TABLE
 AS
 RETURN 
@@ -238,19 +238,73 @@ RETURN
 GO
 
 
---===========================================================================================
---задания
 
-EXEC LogisticsDB.dbo.sp_AddWarehouse 
-    @Location = 'Москва', 
+EXEC LogisticsDB.dbo.sp_AddWarehouse @Location = 'Москва',
     @Capacity = 10000.0,
-    @ManagerContact = 'Иванов Иван',
-    @NewWarehouseID =  OUTPUT;
+    @ManagerContact = 'Иванов Иван';
 
 EXEC LogisticsDB.dbo.sp_AddWarehouse 
     @Location = N'Новосибирск, Склад №2', 
     @Capacity = 5500.0, 
-    @ManagerContact = N'Иван Петров',
-    @NewWarehouseID = @NewWarehouseID OUTPUT;
+    @ManagerContact = N'Иван Петров'
 
 
+
+--===========================================================================================
+-- 4. ТЕСТОВЫЕ СЦЕНАРИИ
+--===========================================================================================
+USE SalesDB;
+GO
+
+EXEC LogisticsDB.dbo.sp_AddWarehouse @Location = 'Главный склад', @Capacity = 10000.0;
+
+-- 4.1. Корректная вставка
+DECLARE @NewCustID INT, @NewOrdID INT;
+EXEC dbo.sp_AddCustomer @FullName = 'Иван Тестеров', @Email = 'ivan@test.com', @NewCustomerID = @NewCustID OUTPUT;
+EXEC dbo.sp_AddOrder @CustomerID = @NewCustID, @OrderTotal = 5000.00, @NewOrderID = @NewOrdID OUTPUT;
+PRINT '4.1: Вставка выполнена. Клиент и заказ созданы.';
+
+-- 4.2.  Обновление статуса на Подтвержден
+UPDATE dbo.Orders SET [Status] = 'Подтвержден' WHERE OrderID = @NewOrdID;
+PRINT '4.2: Статус обновлен. Проверьте Shipments (Доставка должна была создаться автоматически).';
+
+-- 4.3. Обработка ошибки
+PRINT '4.3: Попытка вставить дубликат Email:';
+EXEC dbo.sp_AddCustomer @FullName = 'Клон Ивана', @Email = 'ivan@test.com', @NewCustomerID = @NewCustID OUTPUT; -- Упадет с ошибкой UNIQUE
+
+PRINT '4.3: Попытка создать заказ с суммой <= 0:';
+EXEC dbo.sp_AddOrder @CustomerID = 1, @OrderTotal = -100, @NewOrderID = @NewOrdID OUTPUT; -- Упадет с ошибкой CHECK
+
+-- 4.4. Выборка через функции Прямые SELECT запрещены
+SELECT * FROM SalesDB.dbo.fn_GetCustomers();
+SELECT * FROM SalesDB.dbo.fn_GetOrdersByStatus('Подтвержден');
+SELECT * FROM LogisticsDB.dbo.fn_GetShipmentsByWarehouse(1);
+
+GO
+-- 4.5. Транзакционная целостность Процедура UPDATE с делением на ноль
+CREATE PROCEDURE dbo.sp_UpdateOrder_WithDivZero
+    @OrderID INT
+AS
+BEGIN
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        
+        UPDATE dbo.Orders SET [Status] = 'В пути' WHERE OrderID = @OrderID;
+        
+        -- Имитация ошибки: деление на ноль
+        DECLARE @ErrorVal INT = 1 / 0; 
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        PRINT '4.5: Ошибка UPDATE поймана, произведен автоматический ROLLBACK: ' + ERROR_MESSAGE();
+    END CATCH
+END;
+GO
+
+-- Вызов процедуры из 4.5
+EXEC dbo.sp_UpdateOrder_WithDivZero @OrderID = 1;
+
+-- Проверка, что статус НЕ изменился на 'В пути' из-за ROLLBACK
+SELECT * FROM SalesDB.dbo.fn_GetOrdersByStatus('В пути'); -- Выборка будет пустой
